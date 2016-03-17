@@ -1,9 +1,13 @@
 import java.net.*;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.Callable;
 import java.io.*;
 
 
 //Uses the UTF-8 encoding for characters
 public class PrimaryStation {	
+	
 	
     public static void main(String[] args) throws IOException {
         
@@ -51,11 +55,9 @@ public class PrimaryStation {
         String[] sMessages; // frame buffer
         sMessages = new String[20];
         int nMsg = 0;        
-        
-        
-        boolean bAlive = false;
-		
-        String response = null; // control field of the input
+                
+        boolean bAlive 	= false;		
+        String responseControl = null; // control field of the input
         //
         // initialize some var's for array handling
         //
@@ -83,7 +85,7 @@ public class PrimaryStation {
         // hang up
         //
         serverSocket.setSoTimeout(1000);
-        
+             
         //
         // main server loop
         //
@@ -138,9 +140,9 @@ public class PrimaryStation {
 //        			System.out.println("before");
             		inputLine = s_in[s_count].readLine();
 //            		System.out.println("after: " + inputLine);
-            		response = inputLine.substring(16, 24);
+            		responseControl = inputLine.substring(16, 24);
             		
-            		if(response.equals("11000110") || response.equals("11001110")) {
+            		if(responseControl.equals("11000110") || responseControl.equals("11001110")) {
             			System.out.println("Received UA from station " + clientID[s_count]);
             		}
             		else {
@@ -164,39 +166,47 @@ public class PrimaryStation {
         	for (i=0;i<s_count;i++) {
 
         		// ==============================================================
-        		// insert codes here to send “RR,*,P” msg
+        		// insert codes here to send â€œRR,*,Pâ€� msg
     			
-        		control = "10001" + Integer.toBinaryString(nr[i]);
+        		control = "10001" + Integer.toBinaryString(nr[i] | 0x8).substring(1);
         		s_out[i].println(flag + address[i] + control + fcs + flag);
-        		System.out.println("Sent < RR,*,P > to station " + clientID[i]);
+        		System.out.println("Sent < RR,*,P > to station " + clientID[i] + "control:" + control);
         		// ==============================================================
         		
         		
         		// recv response from the client
         		inputLine = s_in[i].readLine();
+        		boolean finalMessage = false;
         		
         		if(inputLine != null) {		
         		
         			// get control field of the response frame
-        			response = inputLine.substring(16, 24);
+        			responseControl = inputLine.substring(16, 24);
         		
-        			if(response.substring(0,4).equals("1000")) {
-        				// recv “RR,*,F”, no data to send from B
+        			if(responseControl.substring(0,4).equals("1000")) {
+        				// recv â€œRR,*,Fâ€�, no data to send from B
         				System.out.println("Receive RR, *, F from station " + clientID[i]);
         			}
-        			else if(response.substring(0, 1).equals("0")) {
+        			else if(responseControl.substring(0, 1).equals("0")) {
                 		// ==============================================================
-        				// insert codes here to handle the frame “I, *, *” received
+        				// insert codes here to handle the frame â€œI, *, *â€� received
+        				
+        				//how many frames have been received
+        				int counter = 1;
         				
         				do
         				{
+        					System.out.println("responseControl:" + responseControl);
+    						finalMessage = responseControl.substring(4,5).equals("1"); 
+        					
         					//if the frame is to the primary station; consume it
         					//The address of the primary station is "00000000"
         					if(inputLine.substring(8,16).equals("00000000"))
         					{
-        						String data = inputLine.substring(16, inputLine.indexOf(fcs + flag));
+        						String data = inputLine.substring(24, inputLine.indexOf(fcs + flag));
         						System.out.println("Received " + data + " from client " + i+1);
-        						nr[i] = Integer.parseInt(response.substring(1,4), 2) + 1;
+        						System.out.println("Decoded Message:\t" + getStringFromBinary(data));
+        						nr[i] = Integer.parseInt(responseControl.substring(1,4), 2) + 1;
         					}
         					//if the frame is to the secondary station; buffer the frame to send
         					else
@@ -204,18 +214,29 @@ public class PrimaryStation {
         						String tempAddress = inputLine.substring(8,16);
         						System.out.println("Message to be sent to address " + tempAddress);
         						
-        						//Find which client to send it to
-        						for(int j = 0; j < s_count; j++)
-        						{
-        							if(address[j].equals(tempAddress))
-        							{
-        								sMessages[j]=inputLine;
-        							}
-        						}
-        						
+    							sMessages[nMsg] = inputLine;    							
+    							nMsg++;
+    							System.out.println("Number of bufferred messages :" + nMsg);
         					}
-        					    				
         				
+        	        		// continue to get messages from the client if not final message
+        					if(!finalMessage)
+        					{
+        						System.out.println("Counter value:"+counter);
+        						
+        						//We know that the secondary won't be able to send anymore without an ack
+        						if(counter == 3)
+        						{
+        							break;
+        						}        						
+        						inputLine = s_in[i].readLine();
+        						System.out.println("inputLine:\t" + inputLine);
+        						responseControl = inputLine.substring(16, 24);
+        						counter++;
+        					}
+        					else
+        						break;
+        	        		
                 		// ==============================================================
         				}while(inputLine != null);
         			}
@@ -226,15 +247,14 @@ public class PrimaryStation {
         	// insert codes here to send frames in the buffer       	
         	        		
         	// send I frame
-        	for(int j = 0; j < sMessages.length; j++)
-        	{
-        		if(sMessages[j] != null)
-        		{
-        			System.out.println("Send message to client " + j);
-        			s_out[j].println(sMessages[j]);
-        			sMessages[j] = null;
-        		}
+        	for(int j = 0; j < nMsg; j++)
+        	{        		
+        		int clientId = Integer.parseInt(sMessages[j].substring(8, 16),2)-1;
+        		System.out.println("Sending buffered message to client" + clientId);
+        		s_out[clientId].println(sMessages[j]);
         	}
+        	
+        	nMsg = 0;        	
     		// ==============================================================
 			
 		//
@@ -261,4 +281,30 @@ public class PrimaryStation {
         serverSocket.close();
         
     }// end main 
+    
+    private static String getStringFromBinary(String binaryStr)
+    {
+    	//make a copy
+    	String bStr = binaryStr + "";
+    	String message = "";
+    	
+    	while(bStr != null)
+    	{	    		    		
+    		if(bStr.length() <= 7)
+    		{
+    			System.out.println("decoded:" + Integer.parseInt(bStr, 2));
+    			message += (char)Integer.parseInt(bStr, 2) + "";
+    			break;
+    		}
+    		else
+    		{
+    			System.out.println("decoded:" + Integer.parseInt(bStr.substring(0,7), 2) + "\t" + bStr.substring(0,7));
+    			message += (char)Integer.parseInt(bStr.substring(0,7), 2) + "";
+    			bStr = bStr.substring(8);
+    		}
+    	}
+    	
+    	return message;
+    }
+    
 }// end of class PrimaryStation

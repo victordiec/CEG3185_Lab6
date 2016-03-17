@@ -7,6 +7,8 @@ import java.io.*;
 //Since each ASCII character is represented by 7 bits, 9 characters can be placed
 //into the information field
 
+//Window Size of 4
+
 public class SecondaryStation {
 	
 	static final String FLAG 	= "01111110";
@@ -26,17 +28,28 @@ public class SecondaryStation {
 		String information = null;
 		String control = null;		
 		String address = null;  
-		String response = null; // control field of the socket input
+		String responseControl = null; // control field of the socket input
 		
-		int ns = -1; // send sequence number
-		int nr = 0; //receive sequence number
+		int ns = 0; 	// send sequence number
+						// will now also represent the next frame to be sent
+		
+		int nr = 0;  	//receive sequence number
+						//last sequence number sent by another station to this station
+		
+		int ack = 0;
 		
 		//
 		String answer = null; // input using keyboard
 		
 		//String to be sent
 		String sendStr = null;
-       		
+       	
+		//Circular Array for the use of storing messages before they are sent
+		String buffer[] = new String[14];
+		
+		//Next free frame in buffer to add information for sliding window
+		int nextFreeFrame = 0;
+		
 //		 Initialization section:
 //		 Try to open a socket on port 4444
 //		 Try to open input and output streams
@@ -67,11 +80,11 @@ public class SecondaryStation {
 				
 				
 				responseLine = is.readLine();
-				response = responseLine.substring(16, 24);
+				responseControl = responseLine.substring(16, 24);
 
 				// recv SNRM msg
 				// fifth bit should always be a polling bit
-				if(response.equals("11000001") || response.equals("11001001")) {
+				if(responseControl.equals("11000001") || responseControl.equals("11001001")) {
 					//===========================================================
 					// insert codes here to send the UA msg					
 					
@@ -105,18 +118,23 @@ public class SecondaryStation {
 				// main loop; recv and send data msgs
 				while (true) {
 					responseLine = is.readLine();
-					response = responseLine.substring(16, 24);
+					responseControl = responseLine.substring(16, 24);
 					
-					System.out.println("recv msg -- control " + response);				
+					System.out.println("recv msg -- control " + responseControl);				
 					
 					// recv ??RR,*,P?? msg
-					if(response.substring(0,5).equals("10001")) {
+					if(responseControl.substring(0,5).equals("10001")) {
+						
+						ack += Integer.parseInt(responseControl.substring(5),2);
 						
 						// enter data msg using keyboard 
 						System.out.println("Is there any message to send? (y/n)");
 						answer = in.readLine();						
 						
-						if(answer.toLowerCase().equals("y") || answer.toLowerCase().equals("yes")) {
+						//Ask the user if there is more information to send, if the buffer is not full
+						//ns == -1 lets it work at the beginning
+						if((answer.toLowerCase().equals("y") || answer.toLowerCase().equals("yes")) && (nextFreeFrame + 1 != ack)) 
+						{														
 							System.out.println("Please enter the destination address using 8-bits binary string (e.g. 00000001):");
 							address = in.readLine();
 							
@@ -131,65 +149,101 @@ public class SecondaryStation {
 							int finalBit = 0;
 							do
 							{
-								if(infoString.length() <= 9)
+								//Each information field can hold a maximum of 73 characters
+								if(infoString.length() <= 73)
 								{
-									finalBit = 1;
-									infoBytes = convertToBinary(infoString) + "";
+									finalBit 	= 1;
+									infoBytes 	= convertToBinary(infoString) + "";
 									
 								}
 								else
 								{
-									infoBytes = convertToBinary(infoString.substring(0, 10)) + "";
-									infoString = infoString.substring(0);
+									infoBytes = convertToBinary(infoString.substring(0, 74)) + "";
+									infoString = infoString.substring(74);
 								}
 								
-								ns = ns+1 % 8;
-								control = "0" + Integer.toBinaryString(ns | 0x8).substring(1) + "" + finalBit + "" + Integer.toBinaryString(nr | 0x8).substring(1);
+//								ns = ns + 1 % buffer.length;
+								control = "0" + Integer.toBinaryString(nextFreeFrame %8 | 0x8).substring(1) + "" + finalBit + "" + Integer.toBinaryString(nr%8 | 0x8).substring(1);
 								sendStr = FLAG + address + control + infoBytes + FCS + FLAG;
 								System.out.println("Address:\t" + address + "\nControl:\t" + control + "\nInfoBytes:\t" + infoBytes);
-								System.out.println("Sending " + sendStr);
-								os.println(sendStr);
-							
+								System.out.println("Adding to buffer:\t" + sendStr);
+
+								//If the next free frame after the one that is about to be filled is already full
+								if(nextFreeFrame+1 % buffer.length == nr)
+								{
+									throw new Exception("Overloaded buffer");
+								}
+								else
+								{
+									buffer[nextFreeFrame] = sendStr;
+									nextFreeFrame = nextFreeFrame + 1 % buffer.length;
+								}
 							}
 							while(finalBit != 1);
 							//===========================================================
 						
-						}				
+						}
+						
+						System.out.println("ns:" + ns + "ack:" + ack + ",nextFreeFrame:" + nextFreeFrame);
+						if(ns < ack + 3 && nextFreeFrame != ns)
+						{
+							//While the end of the sliding window has yet to be reached or there is no more data to send
+							do
+							{								
+								System.out.println("Sending: frame" + ns + "\t" + buffer[ns]);
+								os.println(buffer[ns]);
+								ns = ns + 1 % buffer.length;
+							}
+							while(ns < ack + 3 && ns != nextFreeFrame);
+							System.out.println("Finished sending frames");
+						}
 						else {
 							//===========================================================
 							// insert codes here to send ??RR,*,F??
-							control = "10001" + Integer.toBinaryString(nr | 0x8);
+							control = "10001" + Integer.toBinaryString(nr % 8| 0x8).substring(1);
 							address = id;
 							sendStr = FLAG + address + control + FCS + FLAG;
-							System.out.println("Address:\t" + address + "\nControl:\t" + control);
-							os.print(sendStr);
+							System.out.println("Sending RR F\nAddress:\t" + address + "\nControl:\t" + control);
+							os.println(sendStr);
 							//===========================================================
 						}
 					}
 					
 					// recv an I frame
-					if(response.substring(0,1).equals("0")) {
-						String data = responseLine.substring(24, responseLine.length()-8);
+					if(responseControl.substring(0,1).equals("0")) {
+						String data = responseLine.substring(24, responseLine.indexOf(FCS + FLAG));
 						System.out.println("");
-						System.out.println("Received data: " + data);						
+						System.out.println("Received data: " + data);
+						System.out.println("Decoded:" + getStringFromBinary(data));
 						
-						nr = Integer.parseInt(response.substring(1,4), 2) + 1;
+						nr = Integer.parseInt(responseControl.substring(1,4), 2) + 1;
 						System.out.println("nr: " + nr);
+						
+						//They're waiting for this frame to send
+						System.out.println("ACK: " + ack + "," + responseControl.substring(5) + " " + Integer.parseInt(responseControl.substring(5), 2));
+						ack += Integer.parseInt(responseControl.substring(5), 2);
 					}
 				}
 			} 
 			catch (UnknownHostException e) {
 				System.err.println("Trying to connect to unknown host: " + e);
+				e.printStackTrace();
 			} 
 			catch (IOException e) {
 				System.err.println("IOException: " + e);
-			}	
+				e.printStackTrace();
+			}
+			catch(Exception e)
+			{
+				System.err.println("Exception: " + e);
+				e.printStackTrace();
+			}
 		}
 	}
 	
 	private static String convertToBinary(String original)
 	{
-		
+		System.out.println("String to be converted to binary:\t" + original);
 		byte[] bytes = original.getBytes();
 	    StringBuilder binary = new StringBuilder();
 		for (byte b : bytes)
@@ -202,8 +256,32 @@ public class SecondaryStation {
 		    }
 //		    binary.append(' ');
 		}
-		return binary.toString();
+		return binary.toString().substring(1);
 	}
 	
+    private static String getStringFromBinary(String binaryStr)
+    {
+    	//make a copy
+    	String bStr = binaryStr + "";
+    	String message = "";
+    	
+    	while(bStr != null)
+    	{	    		    		
+    		if(bStr.length() == 7)
+    		{
+    			System.out.println("decoded:" + Integer.parseInt(bStr, 2));
+    			message += (char)Integer.parseInt(bStr, 2) + "";
+    			break;
+    		}
+    		else
+    		{
+    			System.out.println("decoded:" + Integer.parseInt(bStr.substring(0,7), 2) + "\t" + bStr.substring(0,7));
+    			message += (char)Integer.parseInt(bStr.substring(0,7), 2) + "";
+    			bStr = bStr.substring(8);
+    		}
+    	}
+    	
+    	return message;
+    }
 
 }// end of class SecondaryStation
